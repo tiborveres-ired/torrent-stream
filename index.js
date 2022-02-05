@@ -14,7 +14,7 @@ var piece = require('torrent-piece')
 var rimraf = require('rimraf')
 var FSChunkStore = require('fs-chunk-store')
 var ImmediateChunkStore = require('immediate-chunk-store')
-var peerDiscovery = require('torrent-discovery')
+var Discovery = require('torrent-discovery')
 var bufferFrom = require('buffer-from')
 
 var blocklist = require('ip-set')
@@ -108,23 +108,33 @@ var torrentStream = function (link, opts, cb) {
   engine._flood = opts.flood
   engine._pulse = opts.pulse
 
-  var discovery = peerDiscovery({
-    peerId: bufferFrom(opts.id),
-    dht: (opts.dht !== undefined) ? opts.dht : true,
-    tracker: (opts.tracker !== undefined) ? opts.tracker : true,
-    port: DEFAULT_PORT,
-    announce: opts.trackers
-  })
   var blocked = blocklist(opts.blocklist)
 
-  discovery.on('peer', function (addr) {
-    if (blocked.contains(addr.split(':')[0])) {
-      engine.emit('blocked-peer', addr)
-    } else {
-      engine.emit('peer', addr)
-      engine.connect(addr)
-    }
-  })
+  var discovery = undefined
+
+  var updateDiscovery = function () {
+    if (discovery) discovery.destroy()
+
+    discovery = new Discovery({
+      infoHash: infoHash,
+      peerId: bufferFrom(opts.id),
+      dht: (opts.dht !== undefined) ? opts.dht : true,
+      tracker: (opts.tracker !== undefined) ? opts.tracker : true,
+      port: DEFAULT_PORT,
+      announce: link.announce // + opts.trackers
+    })
+
+    discovery.on('peer', function (addr) {
+      if (blocked.contains(addr.split(':')[0])) {
+        engine.emit('blocked-peer', addr)
+      } else {
+        engine.emit('peer', addr)
+        engine.connect(addr)
+      }
+    })
+  }
+
+  updateDiscovery()
 
   var ontorrent = function (torrent) {
     var storage = opts.storage || FSChunkStore
@@ -150,11 +160,11 @@ var torrentStream = function (link, opts, cb) {
       return []
     })
 
-    process.nextTick(function () {
-      // Gives the user a chance to call engine.listen(PORT) on the same tick,
-      // so discovery will start using the correct torrent port.
-      discovery.setTorrent(torrent)
-    })
+    // process.nextTick(function () {
+    //   // Gives the user a chance to call engine.listen(PORT) on the same tick,
+    //   // so discovery will start using the correct torrent port.
+    //   discovery.setTorrent(torrent)
+    // })
 
     engine.files = torrent.files.map(function (file) {
       file = Object.create(file)
@@ -616,18 +626,19 @@ var torrentStream = function (link, opts, cb) {
 
       // We know only infoHash here, not full infoDictionary.
       // But infoHash is enough to connect to trackers and get peers.
-      if (!buf) return discovery.setTorrent(link)
+      if (!buf) return //discovery.setTorrent(link)
 
       var torrent = parseTorrent(buf)
 
       // Bad cache file - fetch it again
-      if (torrent.infoHash !== infoHash) return discovery.setTorrent(link)
+      if (torrent.infoHash !== infoHash) return //discovery.setTorrent(link)
 
       if (!torrent.announce || !torrent.announce.length) {
         opts.trackers = [].concat(opts.trackers || []).concat(link.announce || [])
       }
 
       engine.metadata = torrent.infoBuffer
+      link = torrent;
       ontorrent(torrent)
     })
   }
@@ -751,7 +762,7 @@ var torrentStream = function (link, opts, cb) {
     destroyed = true
     swarm.destroy()
     clearInterval(rechokeIntervalId)
-    discovery.stop()
+    discovery.destroy()
     if (engine.store && engine.store.close) {
       engine.store.close(cb)
     } else if (cb) {
