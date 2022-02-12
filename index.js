@@ -1,10 +1,7 @@
 var hat = require('hat')
 var pws = require('peer-wire-swarm')
-var bncode = require('bncode')
 var crypto = require('crypto')
 var bitfield = require('bitfield')
-var parseTorrent = require('parse-torrent')
-var mkdirp = require('mkdirp')
 var events = require('events')
 var path = require('path')
 var fs = require('fs')
@@ -18,7 +15,6 @@ var Discovery = require('torrent-discovery')
 var bufferFrom = require('buffer-from')
 
 var blocklist = require('ip-set')
-var exchangeMetadata = require('./lib/exchange-metadata')
 var fileStream = require('./lib/file-stream')
 
 var MAX_REQUESTS = 5
@@ -56,7 +52,6 @@ var toNumber = function (val) {
 var torrentStream = function (link, opts, cb) {
   if (typeof opts === 'function') return torrentStream(link, null, opts)
 
-  link = parseTorrent(link)
   var metadata = link.infoBuffer || null
   var infoHash = link.infoHash
 
@@ -76,7 +71,7 @@ var torrentStream = function (link, opts, cb) {
   }
 
   var engine = new events.EventEmitter()
-  var swarm = pws(infoHash, opts.id, { size: (opts.connections || opts.size), speed: 10 })
+  var swarm
   var torrentPath = path.join(opts.tmp, opts.name, infoHash + '.torrent')
 
   if (cb) engine.on('ready', cb.bind(null, engine))
@@ -86,7 +81,7 @@ var torrentStream = function (link, opts, cb) {
     else engine.once('ready', cb)
   }
 
-  var wires = swarm.wires
+  var wires
   var critical = []
   var refresh = noop
 
@@ -104,24 +99,42 @@ var torrentStream = function (link, opts, cb) {
   engine.bitfield = null
   engine.amInterested = false
   engine.store = null
-  engine.swarm = swarm
   engine._flood = opts.flood
   engine._pulse = opts.pulse
 
   var blocked = blocklist(opts.blocklist)
 
-  var discovery = undefined
+  var calcLeft = function () {
+    if (!engine.torrent || !engine.bitfield) return undefined
+    var leftPieces = 0
+    for (var i = 0; i < engine.torrent.pieces.length; i++) {
+      if (!engine.bitfield.get(i)) leftPieces++
+    }
+    return Math.min(leftPieces * engine.torrent.pieceLength, engine.torrent.length)
+  }
 
-  var updateDiscovery = function () {
-    if (discovery) discovery.destroy()
+  var discovery
+
+  var startSwarmAndDiscovery = function() {
+    swarm = pws(infoHash, opts.id, { size: (opts.connections || opts.size), speed: 10 })
+    engine.swarm = swarm
+    wires = swarm.wires
 
     discovery = new Discovery({
       infoHash: infoHash,
       peerId: bufferFrom(opts.id),
-      dht: (opts.dht !== undefined) ? opts.dht : true,
-      tracker: (opts.tracker !== undefined) ? opts.tracker : true,
+      dht: false,
+      tracker: {
+        getAnnounceOpts: function () {
+          var result = { uploaded: engine.swarm.uploaded, downloaded: engine.swarm.downloaded }
+          var left = calcLeft()
+          if (left !== undefined) result.left = left
+          console.log('announce', result)
+          return result
+        }
+      },
       port: DEFAULT_PORT,
-      announce: link.announce // + opts.trackers
+      announce: link.announce
     })
 
     discovery.on('peer', function (addr) {
@@ -133,8 +146,6 @@ var torrentStream = function (link, opts, cb) {
       }
     })
   }
-
-  updateDiscovery()
 
   var ontorrent = function (torrent) {
     var storage = opts.storage || FSChunkStore
@@ -160,39 +171,12 @@ var torrentStream = function (link, opts, cb) {
       return []
     })
 
-    // process.nextTick(function () {
-    //   // Gives the user a chance to call engine.listen(PORT) on the same tick,
-    //   // so discovery will start using the correct torrent port.
-    //   discovery.setTorrent(torrent)
-    // })
-
-    engine.files = torrent.files.map(function (file) {
-      file = Object.create(file)
-      var offsetPiece = (file.offset / torrent.pieceLength) | 0
-      var endPiece = ((file.offset + file.length - 1) / torrent.pieceLength) | 0
-
-      file.deselect = function () {
-        engine.deselect(offsetPiece, endPiece, false)
+    engine.piecesStat = function () {
+      return {
+        left: pieces ? pieces.reduce(function (acc, p) { return (p ? acc + 1 : acc) }, 0 ) : 0,
+        total: pieces ? pieces.length : 0
       }
-
-      file.select = function () {
-        engine.select(offsetPiece, endPiece, false)
-      }
-
-      file.createReadStream = function (opts) {
-        var stream = fileStream(engine, file, opts)
-
-        var notify = stream.notify.bind(stream)
-        engine.select(stream.startPiece, stream.endPiece, true, notify)
-        eos(stream, function () {
-          engine.deselect(stream.startPiece, stream.endPiece, true, notify)
-        })
-
-        return stream
-      }
-
-      return file
-    })
+    }
 
     var oninterestchange = function () {
       var prev = engine.amInterested
@@ -556,6 +540,38 @@ var torrentStream = function (link, opts, cb) {
 
     var onready = function () {
       if (destroyed) return
+
+      startSwarmAndDiscovery()
+
+      engine.files = torrent.files.map(function (file) {
+        file = Object.create(file)
+        var offsetPiece = (file.offset / torrent.pieceLength) | 0
+        var endPiece = ((file.offset + file.length - 1) / torrent.pieceLength) | 0
+
+        file.deselect = function () {
+          engine.deselect(offsetPiece, endPiece, false)
+        }
+
+        file.select = function () {
+          engine.select(offsetPiece, endPiece, false)
+        }
+
+        file.createReadStream = function (opts) {
+          var stream = fileStream(engine, file, opts)
+
+          var notify = stream.notify.bind(stream)
+          engine.select(stream.startPiece, stream.endPiece, 10, notify)
+
+          var p = stream.endPiece + 1;
+          engine.select(p, p + 10 * 1024 * 1024 / torrent.pieceLength, 5 )
+          engine.select(p + 10 * 1024 * 1024 / torrent.pieceLength + 1, p + 100 * 1024 * 1024 / torrent.pieceLength + 1, 2 )
+
+          return stream
+        }
+
+        return file
+      })
+
       swarm.on('wire', onwire)
       swarm.wires.forEach(onwire)
 
@@ -577,6 +593,7 @@ var torrentStream = function (link, opts, cb) {
     if (opts.verify === false) return onready()
 
     engine.emit('verifying')
+    console.log('verifying!!');
 
     var loop = function (i) {
       if (i >= torrent.pieces.length) return onready()
@@ -592,62 +609,18 @@ var torrentStream = function (link, opts, cb) {
     loop(0)
   }
 
-  var exchange = exchangeMetadata(engine, function (metadata) {
-    var buf = bncode.encode({
-      info: bncode.decode(metadata),
-      'announce-list': []
-    })
-
-    ontorrent(parseTorrent(buf))
-
-    mkdirp(path.dirname(torrentPath), function (err) {
-      if (err) return engine.emit('error', err)
-      fs.writeFile(torrentPath, buf, function (err) {
-        if (err) engine.emit('error', err)
-      })
-    })
-  })
-
-  swarm.on('wire', function (wire) {
-    engine.emit('wire', wire)
-    exchange(wire)
-    if (engine.bitfield) wire.bitfield(engine.bitfield)
-  })
-
-  swarm.pause()
-
-  if (link.files && engine.metadata) {
-    swarm.resume()
-    ontorrent(link)
-  } else {
-    fs.readFile(torrentPath, function (_, buf) {
-      if (destroyed) return
-      swarm.resume()
-
-      // We know only infoHash here, not full infoDictionary.
-      // But infoHash is enough to connect to trackers and get peers.
-      if (!buf) return //discovery.setTorrent(link)
-
-      var torrent = parseTorrent(buf)
-
-      // Bad cache file - fetch it again
-      if (torrent.infoHash !== infoHash) return //discovery.setTorrent(link)
-
-      if (!torrent.announce || !torrent.announce.length) {
-        opts.trackers = [].concat(opts.trackers || []).concat(link.announce || [])
-      }
-
-      engine.metadata = torrent.infoBuffer
-      link = torrent;
-      ontorrent(torrent)
-    })
-  }
+  ontorrent(link)
 
   engine.critical = function (piece, width) {
     for (var i = 0; i < (width || 1); i++) critical[piece + i] = true
   }
 
   engine.select = function (from, to, priority, notify) {
+    var lastPieceNr = engine.torrent.pieces.length - 1
+    if (from > lastPieceNr) return;
+    if (to > lastPieceNr)
+      to = lastPieceNr
+
     engine.selection.push({
       from: from,
       to: to,
