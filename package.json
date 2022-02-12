@@ -13,6 +13,7 @@
     "hat": "0.0.3",
     "immediate-chunk-store": "^1.0.5",
     "ip-set": "^1.0.0",
+    "mkdirp": "^0.3.5",
     "peer-wire-swarm": "^0.12.0",
     "rimraf": "^2.2.5",
     "torrent-discovery": "^9.2.1",
