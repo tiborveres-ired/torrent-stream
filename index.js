@@ -19,7 +19,7 @@ var fileStream = require('./lib/file-stream')
 
 var MAX_REQUESTS = 5
 var CHOKE_TIMEOUT = 5000
-var REQUEST_TIMEOUT = 30000
+var REQUEST_TIMEOUT = 10000
 var SPEED_THRESHOLD = 3 * piece.BLOCK_LENGTH
 var DEFAULT_PORT = 6881
 
@@ -124,7 +124,7 @@ var torrentStream = function (link, opts, cb) {
     discovery = new Discovery({
       infoHash: infoHash,
       peerId: bufferFrom(opts.id),
-      dht: false,
+      dht: link.private ? false : true,
       tracker: {
         getAnnounceOpts: function () {
           var result = { uploaded: engine.swarm.uploaded, downloaded: engine.swarm.downloaded }
@@ -603,7 +603,7 @@ var torrentStream = function (link, opts, cb) {
 
           var p = stream.endPiece + 1;
           engine.select(p, p + 10 * 1024 * 1024 / torrent.pieceLength, 5 )
-          engine.select(p + 10 * 1024 * 1024 / torrent.pieceLength + 1, p + 100 * 1024 * 1024 / torrent.pieceLength + 1, 2 )
+          engine.select(p + 10 * 1024 * 1024 / torrent.pieceLength + 1, p + 100 * 1024 * 1024 / torrent.pieceLength + 1, 0 )
 
           return stream
         }
