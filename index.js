@@ -124,7 +124,8 @@ var torrentStream = function (link, opts, cb) {
     discovery = new Discovery({
       infoHash: infoHash,
       peerId: bufferFrom(opts.id),
-      dht: link.private ? false : true,
+      dht: false,
+      lsd: false,
       tracker: {
         getAnnounceOpts: function () {
           var result = { uploaded: engine.swarm.uploaded, downloaded: engine.swarm.downloaded }
@@ -137,6 +138,8 @@ var torrentStream = function (link, opts, cb) {
       port: DEFAULT_PORT,
       announce: link.announce
     })
+    swarm.listen(DEFAULT_PORT)
+    discovery.updatePort(DEFAULT_PORT)
 
     discovery.on('peer', function (addr) {
       if (blocked.contains(addr.split(':')[0])) {
@@ -459,6 +462,7 @@ var torrentStream = function (link, opts, cb) {
         engine.emit('timeout', wire)
         wire.destroy()
       })
+      wire.bitfield(engine.bitfield)
 
       if (engine.selection.length) wire.interested()
 
@@ -810,30 +814,6 @@ var torrentStream = function (link, opts, cb) {
     } else if (cb) {
       process.nextTick(cb)
     }
-  }
-
-  var findPort = function (def, cb) {
-    var net = require('net')
-    var s = net.createServer()
-
-    s.on('error', function () {
-      findPort(0, cb)
-    })
-
-    s.listen(def, function () {
-      var port = s.address().port
-      s.close(function () {
-        engine.listen(port, cb)
-      })
-    })
-  }
-
-  engine.listen = function (port, cb) {
-    if (typeof port === 'function') return engine.listen(0, port)
-    if (!port) return findPort(opts.port || DEFAULT_PORT, cb)
-    engine.port = port
-    swarm.listen(engine.port, cb)
-    discovery.updatePort(engine.port)
   }
 
   return engine
