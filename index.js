@@ -606,8 +606,10 @@ var torrentStream = function (link, opts, cb) {
           engine.select(stream.startPiece, stream.endPiece, 10, notify)
 
           var p = stream.endPiece + 1;
-          engine.select(p, p + 10 * 1024 * 1024 / torrent.pieceLength, 5 )
-          engine.select(p + 10 * 1024 * 1024 / torrent.pieceLength + 1, p + 100 * 1024 * 1024 / torrent.pieceLength + 1, 0 )
+          var next10Mp = Math.ceil(p + 10 * 1024 * 1024 / torrent.pieceLength)
+          var next100Mp = Math.ceil(p + 100 * 1024 * 1024 / torrent.pieceLength)
+          engine.select(p, next10Mp, 5 )
+          engine.select(next10Mp + 1, next100Mp, 0 )
 
           return stream
         }
