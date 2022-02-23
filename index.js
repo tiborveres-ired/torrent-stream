@@ -176,9 +176,11 @@ var torrentStream = function (link, opts, cb) {
     })
 
     engine.piecesStat = function () {
+      var havePiecesNr = pieces.reduce(function (acc, p) { return (p ? acc : acc + 1) }, 0 )
+
       return {
-        left: pieces ? pieces.reduce(function (acc, p) { return (p ? acc + 1 : acc) }, 0 ) : 0,
-        total: pieces ? pieces.length : 0
+        left: calcLeft(),
+        havePct: Math.round(100 * havePiecesNr / pieces.length)
       }
     }
 
@@ -607,9 +609,9 @@ var torrentStream = function (link, opts, cb) {
 
           var p = stream.endPiece + 1;
           var next10Mp = Math.ceil(p + 10 * 1024 * 1024 / torrent.pieceLength)
-          var next100Mp = Math.ceil(p + 100 * 1024 * 1024 / torrent.pieceLength)
+          var next30Mp = Math.ceil(p + 30 * 1024 * 1024 / torrent.pieceLength)
           engine.select(p, next10Mp, 5 )
-          engine.select(next10Mp + 1, next100Mp, 0 )
+          engine.select(next10Mp + 1, next30Mp, 1 )
 
           return stream
         }
@@ -775,6 +777,9 @@ var torrentStream = function (link, opts, cb) {
   }
 
   var removeTorrent = function (cb) {
+    opts.fastresume && fs.unlink(fastResumeDataPath, function (err) {
+      if (err) return cb(err)
+    })
     fs.unlink(torrentPath, function (err) {
       if (err) return cb(err)
       fs.rmdir(path.dirname(torrentPath), function (err) {
