@@ -42,7 +42,6 @@ var stream = file.createReadStream({
 ```
 
 Per default no files are downloaded unless you create a stream to them.
-If you want to fetch a file without creating a stream you should use the `file.select` and `file.deselect` methods.
 
 When you start torrent-stream it will connect to the torrent dht
 and fetch pieces according to the streams you create.
@@ -151,10 +150,6 @@ A file in the torrent. They contains the following data
 
 Selects the file to be downloaded, but at a lower priority than streams.
 Useful if you know you need the file at a later stage.
-
-#### `file.deselect()`
-
-Deselects the file which means it won't be downloaded unless someone creates a stream to it
 
 #### `stream = file.createReadStream(opts)`
 

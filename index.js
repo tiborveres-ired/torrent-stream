@@ -4,7 +4,7 @@ var crypto = require('crypto')
 var bitfield = require('bitfield')
 var mkdirp = require('mkdirp')
 var events = require('events')
-var path = require('path')
+var npath = require('path')
 var fs = require('fs')
 var os = require('os')
 var piece = require('torrent-piece')
@@ -13,6 +13,7 @@ var FSChunkStore = require('fs-chunk-store')
 var ImmediateChunkStore = require('immediate-chunk-store')
 var Discovery = require('torrent-discovery')
 var bufferFrom = require('buffer-from')
+var { range, sort, descend, path, prop } = require('ramda')
 
 var blocklist = require('ip-set')
 var fileStream = require('./lib/file-stream')
@@ -67,13 +68,13 @@ var torrentStream = function (link, opts, cb) {
 
   if (!opts.path) {
     usingTmp = true
-    opts.path = path.join(opts.tmp, opts.name, infoHash)
+    opts.path = npath.join(opts.tmp, opts.name, infoHash)
   }
 
   var engine = new events.EventEmitter()
   var swarm
-  var torrentPath = path.join(opts.tmp, opts.name, infoHash + '.torrent')
-  var fastResumeDataPath = path.join(opts.tmp, opts.name, infoHash + '.fastresume')
+  var torrentPath = npath.join(opts.tmp, opts.name, infoHash + '.torrent')
+  var fastResumeDataPath = npath.join(opts.tmp, opts.name, infoHash + '.fastresume')
 
   if (cb) engine.on('ready', cb.bind(null, engine))
 
@@ -95,7 +96,7 @@ var torrentStream = function (link, opts, cb) {
   engine.metadata = metadata
   engine.path = opts.path
   engine.files = []
-  engine.selection = []
+  engine.selection = new Map()
   engine.torrent = null
   engine.bitfield = null
   engine.amInterested = false
@@ -156,7 +157,7 @@ var torrentStream = function (link, opts, cb) {
     engine.store = ImmediateChunkStore(storage(torrent.pieceLength, {
       files: torrent.files.map(function (file) {
         return {
-          path: path.join(opts.path, file.path),
+          path: npath.join(opts.path, file.path),
           length: file.length,
           offset: file.offset
         }
@@ -171,6 +172,8 @@ var torrentStream = function (link, opts, cb) {
     var pieces = torrent.pieces.map(function (hash, i) {
       return piece(i === torrent.pieces.length - 1 ? pieceRemainder : pieceLength)
     })
+    engine.pieces = pieces
+
     var reservations = torrent.pieces.map(function () {
       return []
     })
@@ -186,7 +189,7 @@ var torrentStream = function (link, opts, cb) {
 
     var oninterestchange = function () {
       var prev = engine.amInterested
-      engine.amInterested = !!engine.selection.length
+      engine.amInterested = !!engine.selection.size
 
       wires.forEach(function (wire) {
         if (engine.amInterested) wire.interested()
@@ -199,22 +202,7 @@ var torrentStream = function (link, opts, cb) {
     }
 
     var gc = function () {
-      for (var i = 0; i < engine.selection.length; i++) {
-        var s = engine.selection[i]
-        var oldOffset = s.offset
-
-        while (!pieces[s.from + s.offset] && s.from + s.offset < s.to) s.offset++
-
-        if (oldOffset !== s.offset) s.notify()
-        if (s.to !== s.from + s.offset) continue
-        if (pieces[s.from + s.offset]) continue
-
-        engine.selection.splice(i, 1)
-        i-- // -1 to offset splice
-        s.notify()
-        oninterestchange()
-      }
-
+      oninterestchange()
       if (!engine.selection.length) engine.emit('idle')
     }
 
@@ -246,7 +234,7 @@ var torrentStream = function (link, opts, cb) {
         };
       };
 
-      mkdirp(path.dirname(fastResumeDataPath), function(err) {
+      mkdirp(npath.dirname(fastResumeDataPath), function(err) {
         if (done(false)(err)) return
 
         fs.writeFile(fastResumeDataPath, Buffer.concat([sha1(data, true), data]), done(true))
@@ -269,6 +257,12 @@ var torrentStream = function (link, opts, cb) {
         if (!err && opts.fastresume)
           writeFastResumeData(new Buffer(engine.bitfield.buffer))
       })
+
+      if (engine.selection.has(index)) {
+        var selection = engine.selection.get(index)
+        selection.notify()
+        engine.selection.delete(index)
+      }
       gc()
     }
 
@@ -378,12 +372,11 @@ var torrentStream = function (link, opts, cb) {
     var onvalidatewire = function (wire) {
       if (wire.requests.length) return
 
-      for (var i = engine.selection.length - 1; i >= 0; i--) {
-        var next = engine.selection[i]
-        for (var j = next.to; j >= next.from + next.offset; j--) {
-          if (!wire.peerPieces[j]) continue
-          if (onrequest(wire, j, false)) return
-        }
+      var selection = engine.getSelectedPieceIndexes()
+      for (var i = selection.length - 1; i >= 0; i--) {
+        var j = selection[i]
+        if (!wire.peerPieces[j]) continue
+        if (onrequest(wire, j, false)) return
       }
     }
 
@@ -415,16 +408,6 @@ var torrentStream = function (link, opts, cb) {
       }
     }
 
-    var shufflePriority = function (i) {
-      var last = i
-      for (var j = i; j < engine.selection.length && engine.selection[j].priority; j++) {
-        last = j
-      }
-      var tmp = engine.selection[i]
-      engine.selection[i] = engine.selection[last]
-      engine.selection[last] = tmp
-    }
-
     var select = function (wire, hotswap) {
       if (wire.requests.length >= MAX_REQUESTS) return true
 
@@ -435,15 +418,13 @@ var torrentStream = function (link, opts, cb) {
 
       var rank = speedRanker(wire)
 
-      for (var i = 0; i < engine.selection.length; i++) {
-        var next = engine.selection[i]
-        for (var j = next.from + next.offset; j <= next.to; j++) {
-          if (!wire.peerPieces[j] || !rank(j)) continue
-          while (wire.requests.length < MAX_REQUESTS && onrequest(wire, j, critical[j] || hotswap)) {}
-          if (wire.requests.length < MAX_REQUESTS) continue
-          if (next.priority) shufflePriority(i)
-          return true
-        }
+      var selection = engine.getSelectedPieceIndexes()
+      for (var i = 0; i < selection.length; i++) {
+        var j = selection[i]
+        if (!wire.peerPieces[j] || !rank(j)) continue
+        while (wire.requests.length < MAX_REQUESTS && onrequest(wire, j, critical[j] || hotswap)) {}
+        if (wire.requests.length < MAX_REQUESTS) continue
+        return true
       }
 
       return false
@@ -466,7 +447,7 @@ var torrentStream = function (link, opts, cb) {
       })
       wire.bitfield(engine.bitfield)
 
-      if (engine.selection.length) wire.interested()
+      if (engine.selection.size) wire.interested()
 
       var timeout = CHOKE_TIMEOUT
       var id
@@ -593,14 +574,6 @@ var torrentStream = function (link, opts, cb) {
         var offsetPiece = (file.offset / torrent.pieceLength) | 0
         var endPiece = ((file.offset + file.length - 1) / torrent.pieceLength) | 0
 
-        file.deselect = function () {
-          engine.deselect(offsetPiece, endPiece, false)
-        }
-
-        file.select = function () {
-          engine.select(offsetPiece, endPiece, false)
-        }
-
         file.createReadStream = function (opts) {
           var stream = fileStream(engine, file, opts)
 
@@ -692,38 +665,53 @@ var torrentStream = function (link, opts, cb) {
     for (var i = 0; i < (width || 1); i++) critical[piece + i] = true
   }
 
+  engine.getSelectedPieceIndexes = () => {
+    const entries = sort(descend(path([1, 'priority'])), Array.from(engine.selection.entries()))
+    return entries.map(prop(0))
+  }
+
+  engine.selectPiece = (i, priority, notify) => {
+    if (!Number.isInteger(i)) {
+      console.log('selectPiece nonInteger!!', i)
+      return
+    }
+    var lastPieceNr = engine.torrent.pieces.length - 1
+    if (i > lastPieceNr || i < 0) {
+      console.log('selectPiece outside range!!', i)
+      return
+    }
+
+    notify = notify || noop
+    priority = toNumber(priority)
+
+    if (!engine.pieces[i]) { //we already have this
+      notify()
+      return
+    }
+
+    if (engine.selection.has(i)) {
+      var currentSelection = engine.selection.get(i)
+      engine.selection.set(i, {
+        priority: Math.max(priority, currentSelection.priority),
+        notify: () => {
+          notify()
+          currentSelection.notify()
+        }
+      })
+    } else {
+      engine.selection.set(i, { priority, notify })
+    }
+  }
+
   engine.select = function (from, to, priority, notify) {
+    from = Math.floor(from)
+    to = Math.ceil(to)
     var lastPieceNr = engine.torrent.pieces.length - 1
     if (from > lastPieceNr) return;
     if (to > lastPieceNr)
       to = lastPieceNr
 
-    engine.selection.push({
-      from: from,
-      to: to,
-      offset: 0,
-      priority: toNumber(priority),
-      notify: notify || noop
-    })
-
-    engine.selection.sort(function (a, b) {
-      return b.priority - a.priority
-    })
-
-    refresh()
-  }
-
-  engine.deselect = function (from, to, priority, notify) {
-    notify = notify || noop
-    for (var i = 0; i < engine.selection.length; i++) {
-      var s = engine.selection[i]
-      if (s.from !== from || s.to !== to) continue
-      if (s.priority !== toNumber(priority)) continue
-      if (s.notify !== notify) continue
-      engine.selection.splice(i, 1)
-      i--
-      break
-    }
+    range(from, to + 1).forEach((i) => engine.selectPiece(i, priority, notify))
 
     refresh()
   }
@@ -782,7 +770,7 @@ var torrentStream = function (link, opts, cb) {
     })
     fs.unlink(torrentPath, function (err) {
       if (err) return cb(err)
-      fs.rmdir(path.dirname(torrentPath), function (err) {
+      fs.rmdir(npath.dirname(torrentPath), function (err) {
         if (err && err.code !== 'ENOTEMPTY') return cb(err)
         cb()
       })

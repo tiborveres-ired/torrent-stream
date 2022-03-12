@@ -14,14 +14,15 @@
     "immediate-chunk-store": "^1.0.5",
     "ip-set": "^1.0.0",
     "mkdirp": "^0.3.5",
-    "peer-wire-swarm": "../peer-wire-swarm",
+    "peer-wire-swarm": "^0.12.0",
+    "ramda": "^0.28.0",
     "rimraf": "^2.2.5",
     "torrent-discovery": "^9.2.1",
     "torrent-piece": "^1.0.0"
   },
   "devDependencies": {
-    "buffer-alloc": "^1.1.0",
     "bittorrent-tracker": "^9.14.5",
+    "buffer-alloc": "^1.1.0",
     "fs-extra": "^0.26.4",
     "standard": "^5.1.0",
     "tap": "^0.4.8"
